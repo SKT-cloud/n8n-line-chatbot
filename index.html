@@ -8,40 +8,57 @@
 <body>
   <h2>เพิ่มวิชา</h2>
 
+  <label>รหัสวิชา</label><br>
   <input id="subject_code" placeholder="CSI105"><br><br>
+
+  <label>ชื่อวิชา</label><br>
   <input id="subject_name" placeholder="โครงสร้างข้อมูล"><br><br>
 
-  <button onclick="submitForm()">บันทึก</button>
+  <button id="btn" onclick="submitForm()">บันทึก</button>
+  <pre id="status" style="white-space:pre-wrap;"></pre>
 
   <script>
-    const LIFF_ID = "YOUR_LIFF_ID";
+    const LIFF_ID = "2009146879-wz2WlruL";
     const WEBHOOK_URL = "https://spu-n8n.spu.ac.th/webhook/liff/subjects/add";
 
+    const statusEl = document.getElementById("status");
+    const btn = document.getElementById("btn");
+
     async function submitForm() {
-      await liff.init({ liffId: LIFF_ID });
+      try {
+        statusEl.textContent = "กำลังส่ง...";
+        btn.disabled = true;
 
-      if (!liff.isLoggedIn()) {
-        liff.login();
-        return;
+        await liff.init({ liffId: LIFF_ID });
+        if (!liff.isLoggedIn()) { liff.login(); return; }
+
+        const profile = await liff.getProfile();
+
+        const payload = {
+          user_id: profile.userId,
+          subject_code: document.getElementById("subject_code").value,
+          subject_name: document.getElementById("subject_name").value
+        };
+
+        const res = await fetch(WEBHOOK_URL, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload)
+        });
+
+        const data = await res.json().catch(() => ({}));
+        statusEl.textContent = "ตอบกลับจากระบบ:\n" + JSON.stringify(data, null, 2);
+
+        if (res.ok && data.ok) {
+          // สำเร็จค่อยปิด
+          setTimeout(() => liff.closeWindow(), 600);
+        } else {
+          btn.disabled = false;
+        }
+      } catch (e) {
+        statusEl.textContent = "ส่งไม่สำเร็จ: " + String(e);
+        btn.disabled = false;
       }
-
-      const profile = await liff.getProfile();
-
-      const payload = {
-        user_id: profile.userId,
-        subject_code: document.getElementById("subject_code").value,
-        subject_name: document.getElementById("subject_name").value
-      };
-
-      const res = await fetch(WEBHOOK_URL, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(payload)
-      });
-
-      const data = await res.json();
-      alert("บันทึกสำเร็จ");
-      liff.closeWindow();
     }
   </script>
 </body>
