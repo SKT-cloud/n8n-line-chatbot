@@ -1,0 +1,48 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>เพิ่มวิชา</title>
+  <script src="https://static.line-scdn.net/liff/edge/2/sdk.js"></script>
+</head>
+<body>
+  <h2>เพิ่มวิชา</h2>
+
+  <input id="subject_code" placeholder="CSI105"><br><br>
+  <input id="subject_name" placeholder="โครงสร้างข้อมูล"><br><br>
+
+  <button onclick="submitForm()">บันทึก</button>
+
+  <script>
+    const LIFF_ID = "YOUR_LIFF_ID";
+    const WEBHOOK_URL = "https://spu-n8n.spu.ac.th/webhook/liff/subjects/add";
+
+    async function submitForm() {
+      await liff.init({ liffId: LIFF_ID });
+
+      if (!liff.isLoggedIn()) {
+        liff.login();
+        return;
+      }
+
+      const profile = await liff.getProfile();
+
+      const payload = {
+        user_id: profile.userId,
+        subject_code: document.getElementById("subject_code").value,
+        subject_name: document.getElementById("subject_name").value
+      };
+
+      const res = await fetch(WEBHOOK_URL, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload)
+      });
+
+      const data = await res.json();
+      alert("บันทึกสำเร็จ");
+      liff.closeWindow();
+    }
+  </script>
+</body>
+</html>
