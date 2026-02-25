@@ -172,6 +172,7 @@ export default {
     //   extra:{...}
     // }
     // =========================================================
+    
     if (url.pathname === "/schedule/query" && request.method === "POST") {
       let body;
       try {
@@ -184,6 +185,7 @@ export default {
       const intent = norm(body?.intent) || "schedule_all";
       const reqDate = norm(body?.date) || null;
       const reqWeekday = norm(body?.weekday) || null;
+      const modifier = norm(body?.modifier) || null; // e.g. "next_week" | null
 
       if (!user_id) {
         return Response.json({ ok: false, error: "missing user_id" }, { status: 400 });
@@ -197,38 +199,6 @@ export default {
           { status: 400 }
         );
       }
-
-      // ---------- resolve target date ----------
-      // Rules:
-      // - if date provided => use it
-      // - else if weekday provided => nearest day >= today that matches weekday
-      // - else => today
-      let targetDate = reqDate || todayISO;
-      let targetWeekday = reqWeekday || null;
-
-      if (!reqDate && reqWeekday) {
-        // find next occurrence (including today)
-        const maxLookahead = 14;
-        let found = null;
-        for (let i = 0; i <= maxLookahead; i++) {
-          const d = addDays(todayISO, i);
-          const wd = weekdayThaiFromYMD(d);
-          if (wd === reqWeekday) {
-            found = d;
-            break;
-          }
-        }
-        if (found) {
-          targetDate = found;
-          targetWeekday = reqWeekday;
-        } else {
-          targetDate = todayISO;
-          targetWeekday = reqWeekday;
-        }
-      }
-
-      // target weekday from resolved date
-      if (!targetWeekday) targetWeekday = weekdayThaiFromYMD(targetDate);
 
       // ---------- load all subjects in current term ----------
       let allRows = [];
@@ -282,233 +252,496 @@ export default {
         return sortWithinDay(list);
       }
 
-      function clampTitleFromIntent() {
-        // ตั้ง title/altText โดย Worker (Option B)
-        // ใส่รูปแบบวันศุกร์ (07 มี.ค.) ให้ด้วย
-        const dayLabel = formatThaiDayTitle(targetWeekday, targetDate);
+      // ---------- holiday helpers (match your table: holidays) ----------
+      function dayStartISO(ymd) {
+        // stored like 2026-02-24T00:00:00+07:00
+        return `${ymd}T00:00:00+07:00`;
+      }
+      function dayEndISO(ymd) {
+        return `${ymd}T23:59:59+07:00`;
+      }
+
+      async function getHolidayOverlayForDate(user_id, ymd) {
+        const start = dayStartISO(ymd);
+        const end = dayEndISO(ymd);
+
+        // overlap rule: start_at <= endOfDay AND end_at >= startOfDay
+        const res = await env.DB.prepare(
+          `SELECT id, type, subject_id, all_day, start_at, end_at, title, note
+           FROM holidays
+           WHERE user_id = ?
+             AND start_at <= ?
+             AND end_at >= ?`
+        ).bind(user_id, end, start).all();
+
+        const list = res?.results ?? [];
+
+        const fullDay = list.find((x) => norm(x.type) === "holiday" && Number(x.all_day) === 1) || null;
+        const cancels = list.filter((x) => norm(x.type) === "cancel");
+
+        return { fullDay, cancels, raw: list };
+      }
+
+      function matchCancel(row, cancel) {
+        // cancel.subject_id may be subjects.id (integer) OR subject_code string like "CSI103"
+        const sid = cancel?.subject_id;
+
+        if (sid !== null && sid !== undefined && String(sid).trim() !== "") {
+          const sidNum = Number(sid);
+          if (Number.isFinite(sidNum) && Number.isFinite(Number(row?.id))) {
+            if (Number(row.id) === sidNum) return true;
+          }
+
+          const sidStr = norm(String(sid)).toUpperCase();
+          const code = norm(row?.subject_code).toUpperCase();
+          if (sidStr && code && sidStr === code) return true;
+        }
+
+        return false;
+      }
+
+      function thaiRelativeLabel(targetDate) {
+        if (!targetDate) return null;
+        if (targetDate === todayISO) return "วันนี้";
+        if (targetDate === addDays(todayISO, 1)) return "พรุ่งนี้";
+        if (targetDate === addDays(todayISO, 2)) return "มะรืน";
+        return null;
+      }
+
+      function makeHolidayMessage(targetDate, weekdayThai, titleOpt) {
+        const rel = thaiRelativeLabel(targetDate);
+        const dayLabel = formatThaiDayTitle(weekdayThai, targetDate); // "วันพุธ (25 ก.พ.)"
+        const reason = titleOpt ? ` (${norm(titleOpt)})` : "";
+        if (rel) return `${rel}เป็นวันหยุดค่ะ 😊${reason}`;
+        return `${dayLabel} เป็นวันหยุดค่ะ 😊${reason}`;
+      }
+
+      // ---------- resolve target date ----------
+      // Rules:
+      // - schedule_day with weekday + no date + no modifier => "ทั้งเทอม" template view (no date resolve)
+      // - otherwise:
+      //   - if date provided => use it
+      //   - else if weekday + modifier=next_week => weekday in next week
+      //   - else if weekday => nearest day >= today that matches weekday
+      //   - else => today
+      function resolveSpecificDate() {
+        let targetDate = reqDate || todayISO;
+        let targetWeekday = reqWeekday || null;
+
+        if (!reqDate && reqWeekday) {
+          if (modifier === "next_week") {
+            // monday of this week -> monday next week -> +weekday index
+            const dt = ymdToUTCNoon(todayISO);
+            const jsDay = dt.getUTCDay();       // 0..6
+            const mondayBased = (jsDay + 6) % 7; // จันทร์=0
+            const mondayThisWeek = addDays(todayISO, -mondayBased);
+            const mondayNextWeek = addDays(mondayThisWeek, 7);
+
+            const order = ["จันทร์","อังคาร","พุธ","พฤหัสบดี","ศุกร์","เสาร์","อาทิตย์"];
+            const idx = order.indexOf(reqWeekday);
+            targetDate = idx >= 0 ? addDays(mondayNextWeek, idx) : mondayNextWeek;
+            targetWeekday = reqWeekday;
+          } else {
+            // nearest occurrence (including today)
+            const maxLookahead = 14;
+            let found = null;
+            for (let i = 0; i <= maxLookahead; i++) {
+              const d = addDays(todayISO, i);
+              const wd = weekdayThaiFromYMD(d);
+              if (wd === reqWeekday) {
+                found = d;
+                break;
+              }
+            }
+            targetDate = found || todayISO;
+            targetWeekday = reqWeekday;
+          }
+        }
+
+        if (!targetWeekday) targetWeekday = weekdayThaiFromYMD(targetDate);
+        return { targetDate, targetWeekday };
+      }
+
+      function metaForIntent(intent, weekdayThai, ymd, view) {
+        const dayLabel = formatThaiDayTitle(weekdayThai, ymd);
 
         if (intent === "schedule_all") return { title: "ตารางเรียนทั้งหมด", altText: "ตารางเรียนทั้งหมด" };
-        if (intent === "schedule_week") return { title: `ตารางเรียนสัปดาห์นี้`, altText: `ตารางเรียนสัปดาห์นี้` };
+        if (intent === "schedule_week") return { title: "ตารางเรียนสัปดาห์นี้", altText: "ตารางเรียนสัปดาห์นี้" };
+
+        if (intent === "schedule_day" && view === "day_template") {
+          return { title: `ตารางเรียนวัน${weekdayThai} (ทั้งเทอม)`, altText: `ตารางเรียนวัน${weekdayThai} (ทั้งเทอม)` };
+        }
         if (intent === "schedule_day") return { title: `ตารางเรียน${dayLabel}`, altText: `ตารางเรียน${dayLabel}` };
+
         if (intent === "schedule_day_endtime") return { title: `เลิกกี่โมง • ${dayLabel}`, altText: `เลิกกี่โมง • ${dayLabel}` };
         if (intent === "schedule_first") return { title: `คาบแรก • ${dayLabel}`, altText: `คาบแรก • ${dayLabel}` };
         if (intent === "schedule_last") return { title: `คาบสุดท้าย • ${dayLabel}`, altText: `คาบสุดท้าย • ${dayLabel}` };
         if (intent === "schedule_next") return { title: `คาบต่อไป`, altText: `คาบต่อไป` };
         if (intent === "schedule_current") return { title: `ตอนนี้เรียนอะไร`, altText: `ตอนนี้เรียนอะไร` };
+
         return { title: "ตารางเรียน", altText: "ตารางเรียน" };
       }
 
-      // ---------- build response per intent ----------
-      const metaBase = clampTitleFromIntent();
+      // ---------- base response ----------
       const base = {
         ok: true,
         type: "schedule",
         semester: termInfo.semester,
         today: todayISO,
-        date: targetDate,
         meta: {
-          ...metaBase,
-          target_weekday: targetWeekday,
-          // subtitle จะให้ flex โชว์บรรทัดรองได้
           subtitle: `เทอม ${termInfo.semester} • วันนี้ ${todayISO}`,
         },
       };
 
       // ========== intent: schedule_all ==========
       if (intent === "schedule_all") {
+        const m = metaForIntent(intent, null, null, "all");
         return Response.json({
           ...base,
           mode: "all",
+          view: "all",
+          date: null,
+          meta: { ...base.meta, ...m, target_weekday: null },
           data: allRows,
         });
       }
 
       // ========== intent: schedule_week ==========
-      // default: สัปดาห์ที่มี targetDate (ถ้า NLU จะส่งแค่ "สัปดาห์หน้า" ก็ยังไงให้ handler ส่ง date = today+7 ได้)
       if (intent === "schedule_week") {
-        // หา Monday ของสัปดาห์ (อิง จันทร์=1)
+        const { targetDate } = resolveSpecificDate();
+
         const dt = ymdToUTCNoon(targetDate);
         const jsDay = dt.getUTCDay(); // 0..6 (0=อาทิตย์)
-        // ต้องแปลงให้ monday-based: monday=0..6
         const mondayBased = (jsDay + 6) % 7; // จันทร์=>0, อาทิตย์=>6
         const weekStart = addDays(targetDate, -mondayBased);
         const weekDates = Array.from({ length: 7 }, (_, i) => addDays(weekStart, i));
         const weekDays = weekDates.map((d) => weekdayThaiFromYMD(d));
-
-        // รวมเฉพาะวันที่อยู่ในสัปดาห์นี้ตาม day field
         const allowedDays = new Set(weekDays);
         const weekRows = allRows.filter((r) => allowedDays.has(norm(r.day)));
 
+        const m = { title: "ตารางเรียนสัปดาห์นี้", altText: "ตารางเรียนสัปดาห์นี้" };
         return Response.json({
           ...base,
           mode: "week",
+          view: "week",
+          date: targetDate,
           week: { start: weekStart, dates: weekDates, days: weekDays },
-          meta: {
-            ...base.meta,
-            title: `ตารางเรียนสัปดาห์นี้`,
-            altText: `ตารางเรียนสัปดาห์นี้`,
-          },
+          meta: { ...base.meta, ...m, target_weekday: null },
           data: weekRows,
         });
       }
 
-      // ========== intent: schedule_day ==========
+      // ========== intent: schedule_day (template vs specific) ==========
       if (intent === "schedule_day") {
-        const list = rowsOfDay(targetWeekday);
-        return Response.json({
-          ...base,
-          mode: "day",
-          data: list.map((x) => ({ ...x, _date: targetDate })), // แปะ date ไว้ให้ flex ใช้ได้
-        });
+        // Template: "ตารางวันจันทร์" => ทั้งเทอม (no date resolve, no holiday overlay)
+        if (reqWeekday && !reqDate && !modifier) {
+          const list = rowsOfDay(reqWeekday);
+          const m = metaForIntent(intent, reqWeekday, null, "day_template");
+          return Response.json({
+            ...base,
+            mode: "day",
+            view: "day_template",
+            date: null,
+            meta: { ...base.meta, ...m, target_weekday: reqWeekday },
+            data: list,
+          });
+        }
+
+        // Specific: resolve a real date (including "จันทร์หน้า")
+        const { targetDate, targetWeekday } = resolveSpecificDate();
+
+        // Holiday overlay
+        try {
+          const h = await getHolidayOverlayForDate(user_id, targetDate);
+
+          // Full day holiday => status only, no schedule
+          if (h.fullDay) {
+            const m = metaForIntent(intent, targetWeekday, targetDate, "day_specific");
+            return Response.json({
+              ...base,
+              mode: "status",
+              view: "holiday_full_day",
+              date: targetDate,
+              meta: { ...base.meta, ...m, target_weekday: targetWeekday },
+              holiday: { type: "holiday", title: norm(h.fullDay.title), note: norm(h.fullDay.note) },
+              data: [],
+              message: makeHolidayMessage(targetDate, targetWeekday, h.fullDay.title),
+            });
+          }
+
+          const list = rowsOfDay(targetWeekday);
+          const cancels = h.cancels || [];
+          const withCancel = list.map((r) => {
+            const canceled = cancels.some((c) => matchCancel(r, c));
+            return canceled ? { ...r, _date: targetDate, _canceled: true } : { ...r, _date: targetDate, _canceled: false };
+          });
+
+          // If all canceled => behave like full day holiday (per your rule)
+          const remaining = withCancel.filter((x) => !x._canceled);
+          if (!remaining.length) {
+            const m = metaForIntent(intent, targetWeekday, targetDate, "day_specific");
+            return Response.json({
+              ...base,
+              mode: "status",
+              view: "holiday_full_day",
+              date: targetDate,
+              meta: { ...base.meta, ...m, target_weekday: targetWeekday },
+              holiday: { type: "cancel", title: "ยกคลาสทั้งวัน", note: "" },
+              data: [],
+              message: makeHolidayMessage(targetDate, targetWeekday, "ยกคลาสทั้งวัน"),
+            });
+          }
+
+          const m = metaForIntent(intent, targetWeekday, targetDate, "day_specific");
+          return Response.json({
+            ...base,
+            mode: "day",
+            view: "day_specific",
+            date: targetDate,
+            meta: { ...base.meta, ...m, target_weekday: targetWeekday },
+            holiday: cancels.length ? { type: "cancel", count: cancels.length } : null,
+            data: withCancel,
+          });
+        } catch (e) {
+          // Holiday table not available => fall back to normal schedule
+          const list = rowsOfDay(targetWeekday).map((x) => ({ ...x, _date: targetDate, _canceled: false }));
+          const m = metaForIntent(intent, targetWeekday, targetDate, "day_specific");
+          return Response.json({
+            ...base,
+            mode: "day",
+            view: "day_specific",
+            date: targetDate,
+            meta: { ...base.meta, ...m, target_weekday: targetWeekday },
+            data: list,
+            warn: "holiday overlay unavailable",
+          });
+        }
       }
 
       // ========== intent: schedule_day_endtime ==========
       if (intent === "schedule_day_endtime") {
-        const list = rowsOfDay(targetWeekday);
-        if (!list.length) {
+        const { targetDate, targetWeekday } = resolveSpecificDate();
+
+        try {
+          const h = await getHolidayOverlayForDate(user_id, targetDate);
+
+          if (h.fullDay) {
+            const m = metaForIntent(intent, targetWeekday, targetDate, "status");
+            return Response.json({
+              ...base,
+              mode: "status",
+              view: "holiday_full_day",
+              date: targetDate,
+              meta: { ...base.meta, ...m, target_weekday: targetWeekday },
+              holiday: { type: "holiday", title: norm(h.fullDay.title), note: norm(h.fullDay.note) },
+              data: [],
+              extra: { end_time: null },
+              message: makeHolidayMessage(targetDate, targetWeekday, h.fullDay.title),
+            });
+          }
+
+          const list = rowsOfDay(targetWeekday);
+          const cancels = h.cancels || [];
+          const withCancel = list.map((r) => {
+            const canceled = cancels.some((c) => matchCancel(r, c));
+            return canceled ? { ...r, _date: targetDate, _canceled: true } : { ...r, _date: targetDate, _canceled: false };
+          });
+          const remaining = withCancel.filter((x) => !x._canceled);
+
+          if (!remaining.length) {
+            const m = metaForIntent(intent, targetWeekday, targetDate, "status");
+            return Response.json({
+              ...base,
+              mode: "status",
+              view: "holiday_full_day",
+              date: targetDate,
+              meta: { ...base.meta, ...m, target_weekday: targetWeekday },
+              holiday: { type: "cancel", title: "ยกคลาสทั้งวัน", note: "" },
+              data: [],
+              extra: { end_time: null },
+              message: makeHolidayMessage(targetDate, targetWeekday, "ยกคลาสทั้งวัน"),
+            });
+          }
+
+          const last = remaining[remaining.length - 1];
+          const m = metaForIntent(intent, targetWeekday, targetDate, "status");
           return Response.json({
             ...base,
             mode: "status",
+            view: "endtime",
+            date: targetDate,
+            meta: { ...base.meta, ...m, target_weekday: targetWeekday },
+            data: [], // ✅ ไม่ส่งตารางตามที่เธอสั่ง
+            extra: { end_time: norm(last.end_time) || null },
+            message: `เลิกประมาณ ${norm(last.end_time)} นะคะ ✨`,
+          });
+        } catch (e) {
+          const list = rowsOfDay(targetWeekday);
+          if (!list.length) {
+            const m = metaForIntent(intent, targetWeekday, targetDate, "status");
+            return Response.json({
+              ...base,
+              mode: "status",
+              view: "endtime",
+              date: targetDate,
+              meta: { ...base.meta, ...m, target_weekday: targetWeekday },
+              data: [],
+              extra: { end_time: null },
+              message: `วันนั้นไม่มีเรียนค่ะ 😊`,
+            });
+          }
+          const last = list[list.length - 1];
+          const m = metaForIntent(intent, targetWeekday, targetDate, "status");
+          return Response.json({
+            ...base,
+            mode: "status",
+            view: "endtime",
+            date: targetDate,
+            meta: { ...base.meta, ...m, target_weekday: targetWeekday },
             data: [],
-            extra: { end_time: null },
-            meta: {
-              ...base.meta,
-              title: `เลิกกี่โมง • ${formatThaiDayTitle(targetWeekday, targetDate)}`,
-              altText: `เลิกกี่โมง • ${formatThaiDayTitle(targetWeekday, targetDate)}`,
-            },
-            message: `วันนี้ไม่มีเรียนค่ะ 😊`,
+            extra: { end_time: norm(last.end_time) || null },
+            message: `เลิกประมาณ ${norm(last.end_time)} นะคะ ✨`,
           });
         }
-        const last = list[list.length - 1];
-        return Response.json({
-          ...base,
-          mode: "status",
-          data: list.map((x) => ({ ...x, _date: targetDate })),
-          extra: { end_time: norm(last.end_time) || null },
-          message: `เลิกประมาณ ${norm(last.end_time)} นะคะ ✨`,
-        });
       }
 
       // ========== intent: schedule_first / schedule_last ==========
       if (intent === "schedule_first" || intent === "schedule_last") {
+        const { targetDate, targetWeekday } = resolveSpecificDate();
         const list = rowsOfDay(targetWeekday);
         if (!list.length) {
+          const m = metaForIntent(intent, targetWeekday, targetDate, "status");
           return Response.json({
             ...base,
             mode: "status",
+            view: "status",
+            date: targetDate,
+            meta: { ...base.meta, ...m, target_weekday: targetWeekday },
             data: [],
-            message: `วันนี้ไม่มีเรียนค่ะ 😊`,
+            message: `วันนั้นไม่มีเรียนค่ะ 😊`,
           });
         }
         const picked = intent === "schedule_first" ? list[0] : list[list.length - 1];
+        const m = metaForIntent(intent, targetWeekday, targetDate, "single");
         return Response.json({
           ...base,
           mode: "single",
-          data: [{ ...picked, _date: targetDate }],
+          view: "single",
+          date: targetDate,
+          meta: { ...base.meta, ...m, target_weekday: targetWeekday },
+          data: [{ ...picked, _date: targetDate, _canceled: false }],
         });
       }
 
       // ========== intent: schedule_current / schedule_next ==========
+      // (ยังไม่ซ้อน holiday ใน current/next รอบนี้ เพื่อให้ patch เล็กและเสถียร)
       if (intent === "schedule_current" || intent === "schedule_next") {
         const now = nowHHMMInBangkok();
 
-        // สแกนวันนี้ก่อน
         const todayWd = weekdayThaiFromYMD(todayISO);
         const listToday = rowsOfDay(todayWd);
 
         if (intent === "schedule_current") {
           const cur = listToday.find((it) => isHHMM(it.start_time) && isHHMM(it.end_time) && inRange(now, it.start_time, it.end_time));
           if (cur) {
+            const m = metaForIntent(intent, todayWd, todayISO, "single");
             return Response.json({
               ...base,
               date: todayISO,
-              meta: {
-                ...base.meta,
-                title: `ตอนนี้เรียนอะไร`,
-                altText: `ตอนนี้เรียนอะไร`,
-                target_weekday: todayWd,
-              },
+              meta: { ...base.meta, ...m, target_weekday: todayWd },
               mode: "single",
-              data: [{ ...cur, _date: todayISO, _now: now }],
+              view: "single",
+              data: [{ ...cur, _date: todayISO, _now: now, _canceled: false }],
               message: `ตอนนี้กำลังเรียนอยู่นะคะ ✨`,
             });
           }
-          // ถ้าไม่เจอคาบที่กำลังเรียน → ตอบสถานะ + แนะนำคาบต่อไป
+
           const nextInToday = listToday.find((it) => isHHMM(it.start_time) && hhmmToMin(it.start_time) > hhmmToMin(now));
           if (nextInToday) {
+            const m = metaForIntent(intent, todayWd, todayISO, "status");
             return Response.json({
               ...base,
               date: todayISO,
-              meta: { ...base.meta, target_weekday: todayWd },
+              meta: { ...base.meta, ...m, target_weekday: todayWd },
               mode: "status",
-              data: [{ ...nextInToday, _date: todayISO, _now: now }],
+              view: "status",
+              data: [{ ...nextInToday, _date: todayISO, _now: now, _canceled: false }],
               message: `ตอนนี้ไม่มีคาบเรียนค่ะ 😊 คาบถัดไปเริ่ม ${norm(nextInToday.start_time)} นะคะ`,
             });
           }
+
+          const m = metaForIntent(intent, todayWd, todayISO, "status");
           return Response.json({
             ...base,
             date: todayISO,
-            meta: { ...base.meta, target_weekday: todayWd },
+            meta: { ...base.meta, ...m, target_weekday: todayWd },
             mode: "status",
+            view: "status",
             data: [],
             message: `ตอนนี้ไม่มีเรียนแล้วค่ะ 😊`,
           });
         }
 
-        // schedule_next
-        // ถ้าวันนี้ยังมีคาบถัดไป → เอาอันแรกที่ start_time > now
         const nextInToday = listToday.find((it) => isHHMM(it.start_time) && hhmmToMin(it.start_time) > hhmmToMin(now));
         if (nextInToday) {
+          const m = metaForIntent(intent, todayWd, todayISO, "single");
           return Response.json({
             ...base,
             date: todayISO,
-            meta: { ...base.meta, target_weekday: todayWd },
+            meta: { ...base.meta, ...m, target_weekday: todayWd },
             mode: "single",
-            data: [{ ...nextInToday, _date: todayISO, _now: now }],
+            view: "single",
+            data: [{ ...nextInToday, _date: todayISO, _now: now, _canceled: false }],
           });
         }
 
-        // ถ้าวันนี้ไม่มีแล้ว → หา “วันถัดไป” ที่มีเรียน (lookahead 14 วัน)
         const maxLookahead = 14;
         for (let i = 1; i <= maxLookahead; i++) {
           const d = addDays(todayISO, i);
           const wd = weekdayThaiFromYMD(d);
           const list = rowsOfDay(wd);
           if (list.length) {
+            const m = metaForIntent(intent, wd, d, "single");
             return Response.json({
               ...base,
               date: d,
-              meta: {
-                ...base.meta,
-                title: `คาบต่อไป`,
-                altText: `คาบต่อไป`,
-                target_weekday: wd,
-              },
+              meta: { ...base.meta, ...m, target_weekday: wd },
               mode: "single",
-              data: [{ ...list[0], _date: d }],
+              view: "single",
+              data: [{ ...list[0], _date: d, _canceled: false }],
               message: `คาบต่อไปคือ ${formatThaiDayTitle(wd, d)} นะคะ ✨`,
             });
           }
         }
 
+        const m = metaForIntent(intent, todayWd, todayISO, "status");
         return Response.json({
           ...base,
           mode: "status",
+          view: "status",
+          date: todayISO,
+          meta: { ...base.meta, ...m, target_weekday: todayWd },
           data: [],
           message: `ยังไม่พบคาบถัดไปในช่วงนี้ค่ะ 😊`,
         });
       }
 
       // fallback
+      const { targetDate, targetWeekday } = resolveSpecificDate();
+      const m = metaForIntent(intent, targetWeekday, targetDate, "status");
       return Response.json({
         ...base,
         ok: false,
         error: "unsupported intent",
         intent,
+        mode: "status",
+        view: "status",
+        date: targetDate,
+        meta: { ...base.meta, ...m, target_weekday: targetWeekday },
+        data: [],
       });
     }
-
-    // =========================
+// =========================
     // 3) ADD SUBJECT (เดิม)
     // POST /subjects
     // =========================
