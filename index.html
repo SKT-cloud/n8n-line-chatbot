@@ -1,65 +1,132 @@
 <!DOCTYPE html>
-<html>
+<html lang="th">
 <head>
   <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>เพิ่มวิชา</title>
+
   <script src="https://static.line-scdn.net/liff/edge/2/sdk.js"></script>
+  <link rel="stylesheet" href="./styles.css" />
 </head>
+
 <body>
-  <h2>เพิ่มวิชา</h2>
+  <main class="container">
+    <header class="header">
+      <div class="badge">StudyBot</div>
+      <h1>เพิ่มวิชา</h1>
+      <p class="subtitle">กรอกให้ครบ แล้วกดบันทึก (เวลาใช้รูปแบบ 24 ชม. เช่น 14:00)</p>
+    </header>
 
-  <label>รหัสวิชา</label><br>
-  <input id="subject_code" placeholder="CSI105"><br><br>
+    <section class="card">
+      <form id="form" class="form" autocomplete="off">
+        <!-- ===== ส่วนบน (คงเดิม) ===== -->
+        <div class="field">
+          <label for="subject_code">รหัสวิชา</label>
+          <input id="subject_code" name="subject_code" placeholder="เช่น CSI105" />
+          <div class="hint">ระบบจะปรับเป็นตัวพิมพ์ใหญ่ให้อัตโนมัติ</div>
+        </div>
 
-  <label>ชื่อวิชา</label><br>
-  <input id="subject_name" placeholder="โครงสร้างข้อมูล"><br><br>
+        <div class="field">
+          <label for="subject_name">ชื่อวิชา</label>
+          <input id="subject_name" name="subject_name" placeholder="กรุณาใส่ชื่อวิชา" />
+        </div>
 
-  <button id="btn" onclick="submitForm()">บันทึก</button>
-  <pre id="status" style="white-space:pre-wrap;"></pre>
+        <div class="grid2">
+          <div class="field">
+            <label for="section">Section</label>
+            <input id="section" name="section" placeholder="1 หรือ 001" inputmode="numeric" />
+            <div class="hint">ระบบจะแปลงเป็น 3 หลัก เช่น 1 → 001</div>
+          </div>
 
-  <script>
-    const LIFF_ID = "2009146879-wz2WlruL";
-    const WEBHOOK_URL = "https://spu-n8n.spu.ac.th/webhook/liff/subjects/add";
+          <div class="field">
+            <label for="type">ประเภท</label>
+            <select id="type" name="type">
+              <option value="">— เลือกประเภท —</option>
+              <option value="ทฤษฎี">ทฤษฎี</option>
+              <option value="ปฏิบัติ">ปฏิบัติ</option>
+            </select>
+          </div>
+        </div>
+        
+        <!-- วัน -->
+        <div class="field">
+          <label for="day">วัน</label>
+          <select id="day" name="day">
+            <option value="">— เลือกวัน —</option>
+            <option>จันทร์</option>
+            <option>อังคาร</option>
+            <option>พุธ</option>
+            <option>พฤหัสบดี</option>
+            <option>ศุกร์</option>
+            <option>เสาร์</option>
+            <option>อาทิตย์</option>
+          </select>
+        </div>
 
-    const statusEl = document.getElementById("status");
-    const btn = document.getElementById("btn");
+        <!-- ห้อง -->
+        <div class="field">
+          <label for="room">ห้อง</label>
+          <input id="room" name="room" placeholder="เลขห้อง" />
+          <div class="hint">ระบบจะ normalize เป็นรูปแบบ 00-0000</div>
+        </div>
 
-    async function submitForm() {
-      try {
-        statusEl.textContent = "กำลังส่ง...";
-        btn.disabled = true;
+        <!-- เวลา -->
+        <div class="grid2">
+          <div class="field">
+            <label for="start_time">เวลาเริ่ม</label>
+            <input id="start_time" name="start_time" type="text" inputmode="numeric" placeholder="เช่น 14:00 หรือ 930" />
+            <div class="timeTools">
+              <button type="button" class="tbtn" data-target="start_time" data-delta="-10">-10</button>
+              <button type="button" class="tbtn" data-target="start_time" data-delta="-5">-5</button>
+              <button type="button" class="tbtn" data-target="start_time" data-delta="5">+5</button>
+              <button type="button" class="tbtn" data-target="start_time" data-delta="10">+10</button>
+            </div>
+            <div class="hint">พิมพ์ได้: 930, 1530, 9:5, 9.30 → ระบบแปลงเป็น HH:MM</div>
+          </div>
 
-        await liff.init({ liffId: LIFF_ID });
-        if (!liff.isLoggedIn()) { liff.login(); return; }
+          <div class="field">
+            <label for="end_time">เวลาเลิก</label>
+            <input id="end_time" name="end_time" type="text" inputmode="numeric" placeholder="เช่น 15:30 หรือ 1530" />
+            <div class="timeTools">
+              <button type="button" class="tbtn" data-target="end_time" data-delta="-10">-10</button>
+              <button type="button" class="tbtn" data-target="end_time" data-delta="-5">-5</button>
+              <button type="button" class="tbtn" data-target="end_time" data-delta="5">+5</button>
+              <button type="button" class="tbtn" data-target="end_time" data-delta="10">+10</button>
+            </div>
+            <div class="hint">เวลาเลิกต้องมากกว่าเวลาเริ่ม</div>
+          </div>
+        </div>
 
-        const profile = await liff.getProfile();
+        <!-- อาจารย์ (ท้ายสุด) -->
+        <div class="field">
+          <label for="instructor">อาจารย์ (บังคับ)</label>
+          <input id="instructor" name="instructor" placeholder="กรุณาใส่ชื่ออาจารย์" />
+          <div class="hint">
+            ถ้าพิมพ์ “อาจารย์/ครู” ระบบจะเปลี่ยนเป็น “อ.” ให้ และถ้าไม่ใส่คำนำหน้าจะเติม “อ.” อัตโนมัติ
+          </div>
+        </div>
 
-        const payload = {
-          user_id: profile.userId,
-          subject_code: document.getElementById("subject_code").value,
-          subject_name: document.getElementById("subject_name").value
-        };
+        <!-- ปุ่ม -->
+        <div class="actions">
+          <button id="btnSubmit" type="submit" class="btn">บันทึก</button>
+          <button id="btnReset" type="button" class="btn ghost">ล้างค่า</button>
+        </div>
 
-        const res = await fetch(WEBHOOK_URL, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(payload)
-        });
+        <div id="err" class="alert error" role="alert" hidden></div>
+        <div id="ok" class="alert ok" role="status" hidden></div>
 
-        const data = await res.json().catch(() => ({}));
-        statusEl.textContent = "ตอบกลับจากระบบ:\n" + JSON.stringify(data, null, 2);
+        <details class="debug">
+          <summary>สถานะระบบ</summary>
+          <pre id="status" class="status"></pre>
+        </details>
+      </form>
+    </section>
 
-        if (res.ok && data.ok) {
-          // สำเร็จค่อยปิด
-          setTimeout(() => liff.closeWindow(), 600);
-        } else {
-          btn.disabled = false;
-        }
-      } catch (e) {
-        statusEl.textContent = "ส่งไม่สำเร็จ: " + String(e);
-        btn.disabled = false;
-      }
-    }
-  </script>
+    <footer class="footer">
+      <span class="muted">Powered by LIFF + n8n</span>
+    </footer>
+  </main>
+
+  <script src="./app.js" defer></script>
 </body>
 </html>
